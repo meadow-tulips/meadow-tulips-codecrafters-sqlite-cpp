@@ -38,6 +38,37 @@ uint64_t readVarint(std::ifstream &ifs)
 
     return result;
 }
+void readBtreeLeafCellForSchemaTable(std::ifstream &ifs, SQL_LITE::Database &db, std::vector<std::pair<std::string, long long int>> valuesVarints)
+{
+    std::vector<std::string> tableNames;
+    std::vector<uint64_t> rootPages;
+
+    for (int i = 0; i < valuesVarints.size(); i++)
+    {
+
+        if (valuesVarints[i].first == "text")
+        {
+            char arr[valuesVarints[i].second + 1]{'\0'};
+            ifs.read(arr, valuesVarints[i].second);
+            if (i == 2)
+            {
+                // Master table & column tbl_name
+                tableNames.push_back(arr);
+            }
+        }
+        else if (valuesVarints[i].first == "integer")
+        {
+            uint64_t num{0};
+            ifs.read((char *)&num, valuesVarints[i].second);
+            rootPages.push_back(htole64(num));
+        }
+    }
+
+    for (int i = 0; i < tableNames.size(); i++)
+    {
+        db.addTableRootPage(tableNames[i], rootPages[i]);
+    }
+}
 
 void readBtreeLeafCell(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum)
 {
@@ -53,18 +84,21 @@ void readBtreeLeafCell(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum)
     while (ifs.tellg() < (headerSize + headerStartPos))
     {
         auto data_typeVarint = readVarint(ifs);
-        if (data_typeVarint == 0)
+        if (data_typeVarint > 0 && data_typeVarint < 7)
         {
-            // null data
-            // payloadSizes.push_back(std::make_pair("null", 0));
+            auto textLength = data_typeVarint < 4 ? data_typeVarint : data_typeVarint == 5 ? 6
+                                                                                           : 8;
+            payloadSizes.push_back(std::make_pair("integer", textLength));
         }
-        if (data_typeVarint >= 13 && data_typeVarint % 2 == 1)
+        else if (data_typeVarint == 7)
+            payloadSizes.push_back(std::make_pair("float", 8));
+        else if (data_typeVarint >= 13 && data_typeVarint % 2 == 1)
         {
             // Text
             auto textLength = (data_typeVarint - 13) / 2;
             payloadSizes.push_back(std::make_pair("text", textLength));
         }
-        if (data_typeVarint >= 12 && data_typeVarint % 2 == 0)
+        else if (data_typeVarint >= 12 && data_typeVarint % 2 == 0)
         {
             // Blob object
             auto textLength = (data_typeVarint - 12) / 2;
@@ -72,19 +106,8 @@ void readBtreeLeafCell(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum)
         }
     }
 
-    for (int i = 0; i < payloadSizes.size(); i++)
-    {
-        if (payloadSizes[i].first == "text")
-        {
-            char arr[payloadSizes[i].second + 1]{'\0'};
-            ifs.read(arr, payloadSizes[i].second);
-            if (pageNum == 1 && i == 2)
-            {
-                // Master table & column tbl_name
-                db.addTableName(arr);
-            }
-        }
-    }
+    if (pageNum == 1)
+        readBtreeLeafCellForSchemaTable(ifs, db, payloadSizes);
 }
 
 void readCell(std::ifstream &ifs, uint16_t cellOffset, uint16_t pageType, SQL_LITE::Database &db, int pageNum)
@@ -99,7 +122,7 @@ void readCell(std::ifstream &ifs, uint16_t cellOffset, uint16_t pageType, SQL_LI
     // reading cell body
 }
 
-short isPageBtree(std::ifstream &ifs, uint8_t pageType)
+short isPageBtree(uint8_t pageType)
 {
 
     if ((ToHex(pageType) == 0x02) || (ToHex(pageType) == 0x05))
@@ -116,8 +139,8 @@ void readPage(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum)
     ifs.read(buffer, 1);
     uint8_t pageType = buffer[0];
     short btreeHeaderSize = 0;
-
-    if ((btreeHeaderSize = isPageBtree(ifs, pageType)) > -1)
+    // std::cout << ToHex(pageType) << std::endl;
+    if ((btreeHeaderSize = isPageBtree(pageType)) > -1)
     {
         memset(buffer, '\0', 1);
         ifs.seekg(2, std::ios::cur);
@@ -164,12 +187,17 @@ void SQL_LITE::FileParser::readFileAndExecuteCommand(std::string command)
     if (ifs.is_open())
     {
         readRootPage(ifs, db);
-
-        if (command == supported_commands[0])
-            db.getDbInfo();
-        else if (command == supported_commands[1])
-            db.displayTableNames();
-
+        if (command.find("select") == 0)
+        {
+            long long pageNum = db.executeSelect(command);
+            if (pageNum < 0)
+                return;
+            ifs.seekg(db.getPageSize() * (pageNum - 1), std::ios::beg);
+            readPage(ifs, db, pageNum);
+            std::cout << db.getPageTables() << std::endl;
+        }
+        else
+            db.execute(command);
         ifs.close();
     }
 }
