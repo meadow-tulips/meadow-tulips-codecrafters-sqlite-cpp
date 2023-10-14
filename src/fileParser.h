@@ -9,7 +9,7 @@ namespace SQL_LITE
     class FileParser
     {
         std::string filePath;
-        std::vector<std::string> supported_commands{".dbinfo"};
+        std::vector<std::string> supported_commands{".dbinfo", ".tables"};
 
     public:
         FileParser(std::string);
