@@ -48,8 +48,9 @@ std::pair<std::string, std::string> *SQL_LITE::Database::executeSelect(std::stri
 
     while ((end = command.find(delimiter, start)) != std::string::npos)
     {
-
-        tokens.push_back(command.substr(start, end - start));
+        std::string token = command.substr(start, end - start);
+        if (token != "select" && token != "from")
+            tokens.push_back(token);
         start = end + delimiter.length();
     }
 
@@ -59,10 +60,16 @@ std::pair<std::string, std::string> *SQL_LITE::Database::executeSelect(std::stri
     //     std::cout << tokens[i] << std::endl;
     // }
 
-    if (tokens.size() < 4)
+    if (tokens.size() < 2)
         return NULL;
     else
-        return new std::pair<std::string, std::string>(tokens[1], tokens[3]);
+    {
+        std::string expression;
+        for (auto it = tokens.begin(); it != (tokens.end() - 1); it++)
+            expression = expression + (*it);
+
+        return new std::pair<std::string, std::string>(expression, tokens[tokens.size() - 1]);
+    }
 }
 
 long long SQL_LITE::Database::getRootPageNumber(std::string tableName)
