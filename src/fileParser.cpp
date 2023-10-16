@@ -2,9 +2,14 @@
 #include <cstring>
 #include <iomanip>
 #include <endian.h>
+#include <unordered_set>
 #include "fileParser.h"
 #include "database.h"
 
+namespace SQL_LITE
+{
+    int parseSQLStatement(std::string statement, std::string entityToSelect);
+}
 unsigned int ToHex(char x)
 {
     return (0xff & (unsigned int)x);
@@ -38,11 +43,42 @@ uint64_t readVarint(std::ifstream &ifs)
 
     return result;
 }
+
+void readBtreeLeafCellForAppropriateColumns(std::ifstream &ifs, SQL_LITE::Database &db, std::vector<std::pair<std::string, long long int>> valuesVarints, std::unordered_set<int> columnIndices)
+{
+    for (int i = 0; i < valuesVarints.size(); i++)
+    {
+        if (valuesVarints[i].first == "text")
+        {
+
+            char arr[valuesVarints[i].second + 1]{'\0'};
+            ifs.read(arr, valuesVarints[i].second);
+            if (columnIndices.find(i) != columnIndices.end())
+            {
+                db.addSqlResult(arr);
+            }
+        }
+        else if (valuesVarints[i].first == "integer")
+        {
+            uint64_t num{0};
+            ifs.read((char *)&num, valuesVarints[i].second);
+
+            // rootPages.push_back(htole64(num));
+        }
+        else if (valuesVarints[i].first == "float")
+        {
+            long double num{};
+            ifs.read((char *)&num, valuesVarints[i].second);
+            // rootPages.push_back(htole64(num));
+        }
+    }
+}
+
 void readBtreeLeafCellForSchemaTable(std::ifstream &ifs, SQL_LITE::Database &db, std::vector<std::pair<std::string, long long int>> valuesVarints)
 {
     std::vector<std::string> tableNames;
     std::vector<uint64_t> rootPages;
-
+    std::vector<std::string> sqlTexts;
     for (int i = 0; i < valuesVarints.size(); i++)
     {
 
@@ -55,6 +91,10 @@ void readBtreeLeafCellForSchemaTable(std::ifstream &ifs, SQL_LITE::Database &db,
                 // Master table & column tbl_name
                 tableNames.push_back(arr);
             }
+            else if (i == 4)
+            {
+                sqlTexts.push_back(arr);
+            }
         }
         else if (valuesVarints[i].first == "integer")
         {
@@ -66,11 +106,11 @@ void readBtreeLeafCellForSchemaTable(std::ifstream &ifs, SQL_LITE::Database &db,
 
     for (int i = 0; i < tableNames.size(); i++)
     {
-        db.addTableRootPage(tableNames[i], rootPages[i]);
+        db.addTableRootPage(tableNames[i], rootPages[i], sqlTexts[i]);
     }
 }
 
-void readBtreeLeafCell(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum)
+void readBtreeLeafCell(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum, std::unordered_set<int> columnIndices)
 {
     auto cell_payload_size = readVarint(ifs);
     std::vector<std::pair<std::string, long long>> payloadSizes;
@@ -80,10 +120,13 @@ void readBtreeLeafCell(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum)
     auto headerStartPos = ifs.tellg();
     auto headerSize = readVarint(ifs);
     auto lastPosition = ifs.tellg();
-    // ifs.seekg(lastPosition);
     while (ifs.tellg() < (headerSize + headerStartPos))
     {
         auto data_typeVarint = readVarint(ifs);
+        if (data_typeVarint == 0)
+            payloadSizes.push_back(std::make_pair("null", 0));
+        else if (data_typeVarint == 8 || data_typeVarint == 9)
+            payloadSizes.push_back(std::make_pair("boolean", 0));
         if (data_typeVarint > 0 && data_typeVarint < 7)
         {
             auto textLength = data_typeVarint < 4 ? data_typeVarint : data_typeVarint == 5 ? 6
@@ -108,15 +151,18 @@ void readBtreeLeafCell(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum)
 
     if (pageNum == 1)
         readBtreeLeafCellForSchemaTable(ifs, db, payloadSizes);
+    else
+        readBtreeLeafCellForAppropriateColumns(ifs, db, payloadSizes, columnIndices);
 }
 
-void readCell(std::ifstream &ifs, uint16_t cellOffset, uint16_t pageType, SQL_LITE::Database &db, int pageNum)
+void readCell(std::ifstream &ifs, uint16_t cellOffset, uint16_t pageType, SQL_LITE::Database &db, int pageNum, std::unordered_set<int> columnIndices)
 {
-    ifs.seekg(cellOffset, std::ios_base::beg);
+    ifs.seekg(db.getPageSize() * (pageNum - 1), std::ios::beg);
+    ifs.seekg(cellOffset, std::ios_base::cur);
     // reading cell header
     if (pageType == 0x0D)
     {
-        readBtreeLeafCell(ifs, db, pageNum);
+        readBtreeLeafCell(ifs, db, pageNum, columnIndices);
     }
 
     // reading cell body
@@ -133,13 +179,12 @@ short isPageBtree(uint8_t pageType)
         return -1;
 }
 
-void readPage(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum)
+void readPage(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum, std::unordered_set<int> columnIndices)
 {
     char buffer[2]{'\0'};
     ifs.read(buffer, 1);
     uint8_t pageType = buffer[0];
     short btreeHeaderSize = 0;
-    // std::cout << ToHex(pageType) << std::endl;
     if ((btreeHeaderSize = isPageBtree(pageType)) > -1)
     {
         memset(buffer, '\0', 1);
@@ -147,16 +192,15 @@ void readPage(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum)
         uint16_t pageCells{0};
         ifs.read((char *)&pageCells, 2);
         db.setPageTables(pageCells);
-        ifs.seekg(100 + btreeHeaderSize, std::ios::beg);
+        ifs.seekg(btreeHeaderSize - 5, std::ios::cur);
         // Now reading cell pointers.
         int counter = 0;
-
         while (counter < db.getPageTables())
         {
             int16_t cellLocation;
             ifs.read((char *)&cellLocation, 2);
             auto nextCellLocation = ifs.tellg();
-            readCell(ifs, be16toh(cellLocation), pageType, db, pageNum);
+            readCell(ifs, be16toh(cellLocation), pageType, db, pageNum, columnIndices);
             ifs.seekg(nextCellLocation, std::ios::beg);
             counter++;
         }
@@ -175,7 +219,7 @@ void readRootPageHeader(std::ifstream &ifs, SQL_LITE::Database &db)
 void readRootPage(std::ifstream &ifs, SQL_LITE::Database &db)
 {
     readRootPageHeader(ifs, db);
-    readPage(ifs, db, 1);
+    readPage(ifs, db, 1, {});
 }
 
 SQL_LITE::FileParser::FileParser(std::string fullFilePath) { filePath = fullFilePath; }
@@ -189,15 +233,69 @@ void SQL_LITE::FileParser::readFileAndExecuteCommand(std::string command)
         readRootPage(ifs, db);
         if (command.find("select") == 0)
         {
-            long long pageNum = db.executeSelect(command);
-            if (pageNum < 0)
+            auto entity = db.executeSelect(command);
+            if (entity == NULL)
+                return;
+            long long pageNum = db.getRootPageNumber(entity->second);
+            if (pageNum < 1)
                 return;
             ifs.seekg(db.getPageSize() * (pageNum - 1), std::ios::beg);
-            readPage(ifs, db, pageNum);
-            std::cout << db.getPageTables() << std::endl;
+
+            if (entity->first == "count(*)")
+            {
+                readPage(ifs, db, pageNum, {});
+                std::cout << db.getPageTables() << std::endl;
+            }
+            else
+            {
+                std::string sqlText = db.getSqlStatement(entity->second);
+                if (sqlText.length() < 1)
+                    return;
+                int entityPosition = SQL_LITE::parseSQLStatement(sqlText, entity->first);
+                if (entityPosition < 0)
+                    return;
+                std::unordered_set<int> v;
+                v.insert(entityPosition);
+                readPage(ifs, db, pageNum, v);
+                db.displaySqlResult();
+            }
+
+            delete entity;
         }
         else
             db.execute(command);
         ifs.close();
     }
+}
+
+int SQL_LITE::parseSQLStatement(std::string sqlStatement, std::string entityToSelect)
+{
+    std::string delimiter = ",";
+
+    size_t start = 0;
+    size_t end = 0;
+    int counter = 0;
+
+    auto statementStartPos = sqlStatement.find("(");
+    if (statementStartPos == std::string::npos)
+        return -1;
+    std::string statement = sqlStatement.substr(statementStartPos);
+    while ((end = statement.find(delimiter, start)) != std::string::npos)
+    {
+        std::string token = statement.substr(start, end - start);
+        if (token.find(entityToSelect) != std::string::npos)
+        {
+            return counter;
+        }
+        counter++;
+        start = end + delimiter.length();
+    }
+    std::string token = statement.substr(start);
+
+    if (token.find(entityToSelect) == 0)
+    {
+        return counter;
+    }
+
+    return -1;
 }

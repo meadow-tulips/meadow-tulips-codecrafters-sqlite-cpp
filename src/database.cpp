@@ -22,9 +22,9 @@ void SQL_LITE::Database::displayTableNames()
     std::cout << std::endl;
 }
 
-void SQL_LITE::Database::addTableRootPage(std::string tableName, uint64_t rootPage)
+void SQL_LITE::Database::addTableRootPage(std::string tableName, uint64_t rootPage, std::string sqlText)
 {
-    tableRootPagesMap.insert({tableName, rootPage});
+    tableRootPagesMap.insert({tableName, std::make_pair(rootPage, sqlText)});
 }
 
 void SQL_LITE::Database::execute(std::string command)
@@ -38,10 +38,8 @@ void SQL_LITE::Database::execute(std::string command)
         executeSelect(command);
 }
 
-long long SQL_LITE::Database::executeSelect(std::string command)
+std::pair<std::string, std::string> *SQL_LITE::Database::executeSelect(std::string command)
 {
-    std::string whatEntity;
-    std::string fromEntity;
     std::string delimiter = " ";
     std::vector<std::string> tokens{};
 
@@ -62,18 +60,40 @@ long long SQL_LITE::Database::executeSelect(std::string command)
     // }
 
     if (tokens.size() < 4)
-        return -1;
-    if (tokens[1] == "count(*)")
-        return getTotalRecordsFromTable(tokens[3]);
-    return -1;
+        return NULL;
+    else
+        return new std::pair<std::string, std::string>(tokens[1], tokens[3]);
 }
 
-long long SQL_LITE::Database::getTotalRecordsFromTable(std::string tableName)
+long long SQL_LITE::Database::getRootPageNumber(std::string tableName)
 {
     if (tableRootPagesMap.find(tableName) != tableRootPagesMap.end())
     {
-        return tableRootPagesMap[tableName];
+        return tableRootPagesMap[tableName].first;
     }
 
     return -1;
+}
+
+std::string SQL_LITE::Database::getSqlStatement(std::string tableName)
+{
+    if (tableRootPagesMap.find(tableName) != tableRootPagesMap.end())
+    {
+        return tableRootPagesMap[tableName].second;
+    }
+
+    return "";
+}
+
+void SQL_LITE::Database::addSqlResult(std::string res)
+{
+    sqlResult.push_back(res);
+}
+
+void SQL_LITE::Database::displaySqlResult()
+{
+    for (int i = 0; i < sqlResult.size(); i++)
+    {
+        std::cout << sqlResult[i] << std::endl;
+    }
 }
