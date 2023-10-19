@@ -7,10 +7,6 @@
 #include "fileParser.h"
 #include "database.h"
 
-namespace SQL_LITE
-{
-    std::vector<int> parseSQLStatement(std::string statement, std::string entityToSelect);
-}
 unsigned int ToHex(char x)
 {
     return (0xff & (unsigned int)x);
@@ -45,14 +41,18 @@ uint64_t readVarint(std::ifstream &ifs)
     return result;
 }
 
-void readBtreeLeafCellForAppropriateColumns(std::ifstream &ifs, SQL_LITE::Database &db, std::vector<std::pair<std::string, long long int>> valuesVarints, std::vector<int> columnIndices)
+void readBtreeLeafCellForAppropriateColumns(std::ifstream &ifs, SQL_LITE::Database &db, std::vector<std::pair<std::string, long long int>> valuesVarints)
 {
+    auto parser = db.getParser();
+    std::string rootPageSQLText = db.getRootPageCreateTableStatement(parser->getFromClause());
+    std::vector<unsigned int> columnIndices = parser->getColumnPositions(rootPageSQLText);
     if (columnIndices.size() == 0)
         return;
     std::string res;
     auto readPos = ifs.tellg();
     for (int p = 0; p < columnIndices.size(); p++)
     {
+
         ifs.seekg(readPos);
         for (int i = 0; i < valuesVarints.size(); i++)
         {
@@ -62,14 +62,26 @@ void readBtreeLeafCellForAppropriateColumns(std::ifstream &ifs, SQL_LITE::Databa
                 ifs.read(arr, valuesVarints[i].second);
                 if (columnIndices[p] == i)
                 {
-                    if (res.length() == 0)
+                    if (p == (columnIndices.size() - 1) && ((parser->getWhereClause()).length() > 0))
                     {
-                        res = arr;
+                        auto where_clause_ob = parser->getWhereClauseObject();
+                        if (!where_clause_ob.isTrue(arr))
+                        {
+                            res = "";
+                            return;
+                        }
                     }
                     else
                     {
-                        res += "|";
-                        res += arr;
+                        if (res.length() == 0)
+                        {
+                            res = arr;
+                        }
+                        else
+                        {
+                            res += "|";
+                            res += arr;
+                        }
                     }
                     break;
                 }
@@ -91,7 +103,7 @@ void readBtreeLeafCellForAppropriateColumns(std::ifstream &ifs, SQL_LITE::Databa
     }
     if (res.length() > 0)
     {
-        db.addSqlResult(res);
+        parser->addSqlResult(res);
     }
 }
 
@@ -131,7 +143,7 @@ void readBtreeLeafCellForSchemaTable(std::ifstream &ifs, SQL_LITE::Database &db,
     }
 }
 
-void readBtreeLeafCell(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum, std::vector<int> columnIndices)
+void readBtreeLeafCell(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum)
 {
     auto cell_payload_size = readVarint(ifs);
     std::vector<std::pair<std::string, long long>> payloadSizes;
@@ -173,17 +185,17 @@ void readBtreeLeafCell(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum, 
     if (pageNum == 1)
         readBtreeLeafCellForSchemaTable(ifs, db, payloadSizes);
     else
-        readBtreeLeafCellForAppropriateColumns(ifs, db, payloadSizes, columnIndices);
+        readBtreeLeafCellForAppropriateColumns(ifs, db, payloadSizes);
 }
 
-void readCell(std::ifstream &ifs, uint16_t cellOffset, uint16_t pageType, SQL_LITE::Database &db, int pageNum, std::vector<int> columnIndices)
+void readCell(std::ifstream &ifs, uint16_t cellOffset, uint16_t pageType, SQL_LITE::Database &db, int pageNum)
 {
     ifs.seekg(db.getPageSize() * (pageNum - 1), std::ios::beg);
     ifs.seekg(cellOffset, std::ios_base::cur);
     // reading cell header
     if (pageType == 0x0D)
     {
-        readBtreeLeafCell(ifs, db, pageNum, columnIndices);
+        readBtreeLeafCell(ifs, db, pageNum);
     }
 
     // reading cell body
@@ -200,7 +212,7 @@ short isPageBtree(uint8_t pageType)
         return -1;
 }
 
-void readPage(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum, std::vector<int> columnIndices)
+void readPage(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum)
 {
     char buffer[2]{'\0'};
     ifs.read(buffer, 1);
@@ -221,7 +233,7 @@ void readPage(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum, std::vect
             int16_t cellLocation;
             ifs.read((char *)&cellLocation, 2);
             auto nextCellLocation = ifs.tellg();
-            readCell(ifs, be16toh(cellLocation), pageType, db, pageNum, columnIndices);
+            readCell(ifs, be16toh(cellLocation), pageType, db, pageNum);
             ifs.seekg(nextCellLocation, std::ios::beg);
             counter++;
         }
@@ -240,7 +252,7 @@ void readRootPageHeader(std::ifstream &ifs, SQL_LITE::Database &db)
 void readRootPage(std::ifstream &ifs, SQL_LITE::Database &db)
 {
     readRootPageHeader(ifs, db);
-    readPage(ifs, db, 1, {});
+    readPage(ifs, db, 1);
 }
 
 SQL_LITE::FileParser::FileParser(std::string fullFilePath) { filePath = fullFilePath; }
@@ -252,85 +264,31 @@ void SQL_LITE::FileParser::readFileAndExecuteCommand(std::string command)
     if (ifs.is_open())
     {
         readRootPage(ifs, db);
-        if (command.find("select") == 0)
+        db.execute(command);
+
+        auto parser = db.getParser();
+
+        auto pageNum = db.getRootPageNumber(parser->getFromClause());
+        auto select_clauses = parser->getSelectClause();
+        if (select_clauses.size() < 0 || pageNum < 1)
+            return;
+
+        ifs.seekg(db.getPageSize() * (pageNum - 1), std::ios::beg);
+
+        if (select_clauses[0] == "count(*)")
         {
-            auto entity = db.executeSelect(command);
-            if (entity == NULL)
-                return;
-            long long pageNum = db.getRootPageNumber(entity->second);
-            if (pageNum < 1)
-                return;
-            ifs.seekg(db.getPageSize() * (pageNum - 1), std::ios::beg);
-
-            if (entity->first == "count(*)")
-            {
-                readPage(ifs, db, pageNum, {});
-                std::cout << db.getPageTables() << std::endl;
-            }
-            else
-            {
-                std::string sqlText = db.getSqlStatement(entity->second);
-                if (sqlText.length() < 1)
-                    return;
-                std::vector<int> positions = SQL_LITE::parseSQLStatement(sqlText, entity->first);
-                readPage(ifs, db, pageNum, positions);
-                db.displaySqlResult();
-            }
-
-            delete entity;
+            readPage(ifs, db, pageNum);
+            std::cout << db.getPageTables() << std::endl;
         }
         else
-            db.execute(command);
+        {
+            std::string rootPageSQLText = db.getRootPageCreateTableStatement(parser->getFromClause());
+            if (rootPageSQLText.length() < 1)
+                return;
+            readPage(ifs, db, pageNum);
+            parser->displaySqlResult();
+        }
+
         ifs.close();
     }
-}
-
-std::vector<int> SQL_LITE::parseSQLStatement(std::string sqlStatement, std::string entityToSelect)
-{
-    std::vector<int> positions;
-    std::string delimiter = ",";
-    std::vector<std::string> entities;
-    std::vector<std::string> splitSqlTokens;
-
-    size_t start = 0;
-    size_t end = 0;
-    int counter = 0;
-
-    while ((end = entityToSelect.find(delimiter, start)) != std::string::npos)
-    {
-        std::string token = entityToSelect.substr(start, end - start);
-        entities.push_back(token);
-        start = delimiter.length() + end;
-    }
-
-    entities.push_back(entityToSelect.substr(start));
-
-    start = 0;
-    end = 0;
-
-    auto statementStartPos = sqlStatement.find("(");
-    if (statementStartPos == std::string::npos)
-        return positions;
-    std::string statement = sqlStatement.substr(statementStartPos);
-    while ((end = statement.find(delimiter, start)) != std::string::npos)
-    {
-        std::string token = statement.substr(start, end - start);
-        splitSqlTokens.push_back(token);
-        start = end + delimiter.length();
-    }
-
-    splitSqlTokens.push_back(statement.substr(start));
-
-    for (auto v = entities.begin(); v != entities.end(); v++)
-    {
-        for (int i = 0; i < splitSqlTokens.size(); i++)
-        {
-            if (splitSqlTokens[i].find(*v) != std::string::npos)
-            {
-                positions.push_back(i);
-                break;
-            }
-        }
-    }
-    return positions;
 }
