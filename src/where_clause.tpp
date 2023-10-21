@@ -8,13 +8,15 @@ SQL_LITE::WhereClause<T>::WhereClause(std::string str)
     char delimiter = ' ';
     int start = 0;
     int end = 0;
-    for (int i = 0; i < 3 && ((end = str.find(delimiter, start)) != std::string::npos); i++)
+    for (int i = 0; i < 2 && ((end = str.find(delimiter, start)) != std::string::npos); i++)
     {
         std::string token = str.substr(start, end - start);
         if (i == 0)
             key = token;
         else if (i == 1 && token.length() == 1)
+        {
             relation = token[0];
+        }
         start = end + 1;
     }
 

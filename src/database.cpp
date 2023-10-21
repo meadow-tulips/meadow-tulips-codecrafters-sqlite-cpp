@@ -1,16 +1,17 @@
 #include <endian.h>
 #include "database.h"
+#include <cstring>
+std::pair<int, bool> getPrimaryKeyIndex(std::string);
 
 uint16_t SQL_LITE::Database::getPageSize() { return pageSize; }
 void SQL_LITE::Database::setPageSize(uint16_t size) { pageSize = be16toh(size); }
 
-uint16_t SQL_LITE::Database::getPageTables() { return pageTables; }
-void SQL_LITE::Database::setPageTables(uint16_t tablesCount) { pageTables = be16toh(tablesCount); }
+void SQL_LITE::Database::setRootPageTables(uint16_t tablesCount) { rootPageTables = tablesCount; }
 
 void SQL_LITE::Database::getDbInfo()
 {
     std::cout << "database page size: " << htole16(pageSize) << std::endl;
-    std::cout << "number of tables: " << htole16(pageTables) << std::endl;
+    std::cout << "number of tables: " << htole16(rootPageTables) << std::endl;
 }
 
 void SQL_LITE::Database::displayTableNames()
@@ -25,7 +26,11 @@ void SQL_LITE::Database::displayTableNames()
 void SQL_LITE::Database::addTableRootPage(std::string tableName, uint64_t rootPage, std::string sqlText)
 {
     if (!tableRootPagesMap.contains(tableName))
-        tableRootPagesMap.insert({tableName, std::make_pair(rootPage, sqlText)});
+    {
+
+        auto v = getPrimaryKeyIndex(sqlText);
+        tableRootPagesMap.insert({tableName, std::make_tuple(rootPage, sqlText, v)});
+    }
 }
 
 void SQL_LITE::Database::execute(std::string command)
@@ -42,7 +47,7 @@ long long SQL_LITE::Database::getRootPageNumber(std::string tableName)
 {
     if (tableRootPagesMap.find(tableName) != tableRootPagesMap.end())
     {
-        return tableRootPagesMap[tableName].first;
+        return std::get<0>(tableRootPagesMap[tableName]);
     }
 
     return -1;
@@ -52,8 +57,57 @@ std::string SQL_LITE::Database::getRootPageCreateTableStatement(std::string tabl
 {
     if (tableRootPagesMap.find(tableName) != tableRootPagesMap.end())
     {
-        return tableRootPagesMap[tableName].second;
+        return std::get<1>(tableRootPagesMap[tableName]);
     }
 
     return "";
+}
+
+std::pair<int, bool> SQL_LITE::Database::getPrimaryKeyInfoFromRootPage()
+{
+    if (parser == NULL)
+        return std::make_pair(-1, false);
+    if (tableRootPagesMap.find(parser->getFromClause()) != tableRootPagesMap.end())
+    {
+        return std::get<2>(tableRootPagesMap[parser->getFromClause()]);
+    }
+    return std::make_pair(-1, false);
+}
+
+std::pair<int, bool> getPrimaryKeyIndex(std::string sqlText)
+{
+
+    size_t start = 0;
+    size_t end = 0;
+    int counter = 0;
+    while ((end = sqlText.find(',', start)) != std::string::npos)
+    {
+        std::string token = sqlText.substr(start, end - start);
+        if (strstr(&token[0], "integer primary key"))
+        {
+            return std::make_pair(counter, true);
+        }
+
+        if (strstr(&token[0], "primary key"))
+        {
+            return std::make_pair(counter, false);
+        }
+
+        start = end + 1;
+        counter++;
+    }
+
+    std::string token = sqlText.substr(start);
+
+    if (strstr(&token[0], "integer primary key"))
+    {
+        return std::make_pair(counter, true);
+    }
+
+    if (strstr(&token[0], "primary key"))
+    {
+        return std::make_pair(counter, false);
+    }
+
+    return std::make_pair(0, false);
 }

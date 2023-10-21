@@ -16,15 +16,20 @@ std::string trimWhiteSpaceAround(std::string s)
 SQL_LITE::SQL_St_Parser::SQL_St_Parser(std::string st)
 {
     statement = st;
-
     std::vector<std::string> delimiters{"select", "from", "where"};
-
+    std::vector<std::string> delimitersUpperCase{"SELECT", "FROM", "WHERE"};
     size_t start = 0;
     size_t end = 0;
     int delimitersFound = 0;
+    bool isDelimiterUpper = false;
     for (int i = 0; i < delimiters.size(); i++)
     {
-        end = st.find(delimiters[i], start);
+        end = st.find(isDelimiterUpper ? delimitersUpperCase[i] : delimiters[i], start);
+        if (i == 0 && end == std::string::npos)
+        {
+            end = st.find(delimitersUpperCase[i], start);
+            isDelimiterUpper = true;
+        }
         if (end == std::string::npos)
             break;
         else if (i == 1)
@@ -32,7 +37,7 @@ SQL_LITE::SQL_St_Parser::SQL_St_Parser(std::string st)
         else if (i == 2)
             from_clause = trimWhiteSpaceAround(st.substr(start, end - start));
 
-        start = end + delimiters[i].length();
+        start = end + (isDelimiterUpper ? delimitersUpperCase[i].length() : delimiters[i].length());
         delimitersFound++;
     }
 
