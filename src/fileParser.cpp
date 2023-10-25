@@ -8,6 +8,7 @@
 #include "database.h"
 
 void readPage(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum);
+void searchPage(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum, uint32_t KeyToLocate = 0);
 
 unsigned int ToHex(char x)
 {
@@ -98,7 +99,6 @@ void readBtreeLeafCellForAppropriateColumns(std::ifstream &ifs, SQL_LITE::Databa
             {
                 uint64_t num{0};
                 ifs.read((char *)&num, valuesVarints[i].second);
-                // std::cerr << "Integer" << p << i << columnIndices[p] << std::endl;
 
                 if (columnIndices[p] == i)
                 {
@@ -190,6 +190,7 @@ void readBtreeLeafCellForAppropriateColumns(std::ifstream &ifs, SQL_LITE::Databa
 
 void readBtreeLeafCellForSchemaTable(std::ifstream &ifs, SQL_LITE::Database &db, std::vector<std::pair<std::string, long long int>> valuesVarints)
 {
+    std::vector<std::string> schemaTypes;
     std::vector<std::string> tableNames;
     std::vector<uint64_t> rootPages;
     std::vector<std::string> sqlTexts;
@@ -200,7 +201,11 @@ void readBtreeLeafCellForSchemaTable(std::ifstream &ifs, SQL_LITE::Database &db,
         {
             char arr[valuesVarints[i].second + 1]{'\0'};
             ifs.read(arr, valuesVarints[i].second);
-            if (i == 2)
+            if (i == 0)
+            {
+                schemaTypes.push_back(arr);
+            }
+            else if (i == 1)
             {
                 // Master table & column tbl_name
                 tableNames.push_back(arr);
@@ -212,15 +217,21 @@ void readBtreeLeafCellForSchemaTable(std::ifstream &ifs, SQL_LITE::Database &db,
         }
         else if (valuesVarints[i].first == "integer")
         {
+            uint8_t _rowId[8]{0};
             uint64_t num{0};
-            ifs.read((char *)&num, valuesVarints[i].second);
-            rootPages.push_back(htole64(num));
+
+            ifs.read((char *)&_rowId[8 - valuesVarints[i].second], valuesVarints[i].second);
+            num = *((uint64_t *)_rowId);
+            rootPages.push_back(be64toh(num));
         }
     }
 
     for (int i = 0; i < tableNames.size(); i++)
     {
-        db.addTableRootPage(tableNames[i], rootPages[i], sqlTexts[i]);
+        if (schemaTypes[i] == "table")
+            db.addTableRootPage(tableNames[i], rootPages[i], sqlTexts[i]);
+        else if (schemaTypes[i] == "index")
+            db.parseIndexSQLText(sqlTexts[i], rootPages[i]);
     }
 }
 
@@ -354,6 +365,393 @@ void readPage(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum)
     }
 }
 
+int searchLeafPage(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum, uint32_t keyToLocate)
+{
+    readVarint(ifs);
+
+    auto rowId = readVarint(ifs);
+    if (rowId != keyToLocate)
+    {
+        return 0;
+    }
+    else
+    {
+        std::vector<std::pair<std::string, long long>> payloadSizes;
+        auto headerStartPos = ifs.tellg();
+        auto headerSize = readVarint(ifs);
+        while (ifs.tellg() < (headerSize + headerStartPos))
+        {
+            auto data_typeVarint = readVarint(ifs);
+            if (data_typeVarint == 0)
+                payloadSizes.push_back(std::make_pair("null", 0));
+            else if (data_typeVarint == 8 || data_typeVarint == 9)
+                payloadSizes.push_back(std::make_pair("boolean", 0));
+            else if (data_typeVarint > 0 && data_typeVarint < 7)
+            {
+                auto textLength = data_typeVarint < 4 ? data_typeVarint : data_typeVarint == 5 ? 6
+                                                                                               : 8;
+                payloadSizes.push_back(std::make_pair("integer", textLength));
+            }
+            else if (data_typeVarint == 7)
+                payloadSizes.push_back(std::make_pair("float", 8));
+            else if (data_typeVarint >= 13 && data_typeVarint % 2 == 1)
+            {
+                // Text
+                auto textLength = (data_typeVarint - 13) / 2;
+                payloadSizes.push_back(std::make_pair("text", textLength));
+            }
+            else if (data_typeVarint >= 12 && data_typeVarint % 2 == 0)
+            {
+                // Blob object
+                auto textLength = (data_typeVarint - 12) / 2;
+                payloadSizes.push_back(std::make_pair("blob", textLength));
+            }
+        }
+
+        auto parser = db.getParser();
+        std::string rootPageSQLText = db.getRootPageCreateTableStatement(parser->getFromClause());
+        std::vector<unsigned int> columnIndices = parser->getColumnPositions(rootPageSQLText);
+
+        std::string res;
+        auto readPos = ifs.tellg();
+
+        for (int p = 0; p < (parser->getWhereClause().length() > 0 ? columnIndices.size() - 1 : columnIndices.size()); p++)
+        {
+
+            ifs.seekg(readPos);
+            for (int i = 0; i < payloadSizes.size(); i++)
+            {
+
+                if (payloadSizes[i].first == "text")
+                {
+                    char arr[payloadSizes[i].second + 1]{'\0'};
+                    ifs.read(arr, payloadSizes[i].second);
+                    if (columnIndices[p] == i && p != columnIndices.size() && (parser->getWhereClause().length() > 0))
+                    {
+
+                        if (res.length() == 0)
+                        {
+                            res = arr;
+                        }
+                        else
+                        {
+                            res += "|";
+                            res += arr;
+                        }
+                        break;
+                    }
+                }
+                else if (payloadSizes[i].first == "integer")
+                {
+                    uint64_t num{0};
+                    ifs.read((char *)&num, payloadSizes[i].second);
+
+                    if (columnIndices[p] == i)
+                    {
+
+                        if (res.length() == 0)
+                        {
+                            res = std::to_string(num);
+                        }
+                        else
+                        {
+                            res += "|";
+                            res += std::to_string(num);
+                        }
+
+                        break;
+                    }
+                }
+                else if (payloadSizes[i].first == "float")
+                {
+                    long double num{};
+                    ifs.read((char *)&num, payloadSizes[i].second);
+                    if (columnIndices[p] == i)
+                    {
+
+                        if (res.length() == 0)
+                        {
+                            res = std::to_string(num);
+                        }
+                        else
+                        {
+                            res += "|";
+                            res += std::to_string(num);
+                        }
+
+                        break;
+                    }
+                }
+                else if (payloadSizes[i].first == "blob")
+                {
+                    char arr[payloadSizes[i].second + 1]{'\0'};
+                    ifs.read(arr, payloadSizes[i].second);
+
+                    if (columnIndices[p] == i)
+                    {
+
+                        if (res.length() == 0)
+                        {
+                            res = arr;
+                        }
+                        else
+                        {
+                            res += "|";
+                            res += arr;
+                        }
+                        break;
+                    }
+                }
+                else if (payloadSizes[i].first == "null")
+                {
+
+                    auto primaryKeyInfo = db.getPrimaryKeyInfoFromRootPage();
+                    if (columnIndices[p] == i && primaryKeyInfo.first == i && primaryKeyInfo.second == true)
+                    {
+                        if (res.length() == 0)
+                        {
+                            res = std::to_string(rowId);
+                        }
+                        else
+                        {
+                            res += "|";
+                            res += std::to_string(rowId);
+                        }
+                    }
+                }
+            }
+        }
+        if (res.length() > 0)
+        {
+            std::cout << res << std::endl;
+        }
+
+        return -1;
+    }
+}
+
+int searchInteriorPage(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum, uint32_t keyToLocate)
+{
+    int leftChildPointerPageNumber;
+    ifs.read((char *)&leftChildPointerPageNumber, 4);
+    leftChildPointerPageNumber = be32toh(leftChildPointerPageNumber);
+    auto key = readVarint(ifs);
+    if (keyToLocate > key)
+    {
+        return 1;
+    }
+    else
+    {
+        searchPage(ifs, db, leftChildPointerPageNumber, keyToLocate);
+        return -1;
+    }
+}
+
+int searchIndexLeafCell(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum)
+{
+    auto payloadSize = readVarint(ifs);
+
+    std::vector<std::pair<std::string, long long>> payloadSizes;
+    auto headerStartPos = ifs.tellg();
+    auto headerSize = readVarint(ifs);
+    while (ifs.tellg() < (headerSize + headerStartPos))
+    {
+        auto data_typeVarint = readVarint(ifs);
+        if (data_typeVarint == 0)
+            payloadSizes.push_back(std::make_pair("null", 0));
+        else if (data_typeVarint == 8 || data_typeVarint == 9)
+            payloadSizes.push_back(std::make_pair("boolean", 0));
+        else if (data_typeVarint > 0 && data_typeVarint < 7)
+        {
+            auto textLength = data_typeVarint < 4 ? data_typeVarint : data_typeVarint == 5 ? 6
+                                                                                           : 8;
+            payloadSizes.push_back(std::make_pair("integer", textLength));
+        }
+        else if (data_typeVarint == 7)
+            payloadSizes.push_back(std::make_pair("float", 8));
+        else if (data_typeVarint >= 13 && data_typeVarint % 2 == 1)
+        {
+            // Text
+            auto textLength = (data_typeVarint - 13) / 2;
+            payloadSizes.push_back(std::make_pair("text", textLength));
+        }
+        else if (data_typeVarint >= 12 && data_typeVarint % 2 == 0)
+        {
+            // Blob object
+            auto textLength = (data_typeVarint - 12) / 2;
+            payloadSizes.push_back(std::make_pair("blob", textLength));
+        }
+    }
+
+    std::string nodeKey;
+    uint64_t rowId;
+    for (int i = 0; i < payloadSizes.size(); i++)
+    {
+        if (payloadSizes[i].first == "text")
+        {
+            char value[payloadSizes[i].second + 1]{'\0'};
+            ifs.read(value, payloadSizes[i].second);
+            nodeKey += value;
+        }
+        else if (payloadSizes[i].first == "integer")
+        {
+
+            uint8_t _rowId[8]{0};
+            ifs.read((char *)&_rowId[8 - payloadSizes[i].second], payloadSizes[i].second);
+            rowId = *((uint64_t *)_rowId);
+        }
+    }
+
+    auto where_ob = db.getParser()->getWhereClauseObject();
+    if (nodeKey > where_ob.getValue())
+    {
+        return -1;
+    }
+    else if (nodeKey < where_ob.getValue())
+    {
+        return 1;
+    }
+    else
+    {
+        db.insertIndexRowId(rowId);
+        return 0;
+    }
+}
+
+int searchIndexInteriorCell(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum)
+{
+    int leftChildPointerPageNumber;
+    ifs.read((char *)&leftChildPointerPageNumber, 4);
+    leftChildPointerPageNumber = be32toh(leftChildPointerPageNumber);
+    auto payloadSize = readVarint(ifs);
+
+    std::vector<std::pair<std::string, long long>> payloadSizes;
+    auto headerStartPos = ifs.tellg();
+    auto headerSize = readVarint(ifs);
+    while (ifs.tellg() < (headerSize + headerStartPos))
+    {
+        auto data_typeVarint = readVarint(ifs);
+        if (data_typeVarint == 0)
+            payloadSizes.push_back(std::make_pair("null", 0));
+        else if (data_typeVarint == 8 || data_typeVarint == 9)
+            payloadSizes.push_back(std::make_pair("boolean", 0));
+        else if (data_typeVarint > 0 && data_typeVarint < 7)
+        {
+            auto textLength = data_typeVarint < 4 ? data_typeVarint : data_typeVarint == 5 ? 6
+                                                                                           : 8;
+            payloadSizes.push_back(std::make_pair("integer", textLength));
+        }
+        else if (data_typeVarint == 7)
+            payloadSizes.push_back(std::make_pair("float", 8));
+        else if (data_typeVarint >= 13 && data_typeVarint % 2 == 1)
+        {
+            // Text
+            auto textLength = (data_typeVarint - 13) / 2;
+            payloadSizes.push_back(std::make_pair("text", textLength));
+        }
+        else if (data_typeVarint >= 12 && data_typeVarint % 2 == 0)
+        {
+            // Blob object
+            auto textLength = (data_typeVarint - 12) / 2;
+            payloadSizes.push_back(std::make_pair("blob", textLength));
+        }
+    }
+
+    std::string nodeKey;
+    uint64_t rowId;
+    for (int i = 0; i < payloadSizes.size(); i++)
+    {
+        if (payloadSizes[i].first == "text")
+        {
+            char value[payloadSizes[i].second + 1];
+            ifs.read(value, payloadSizes[i].second);
+            nodeKey += value;
+        }
+        else if (payloadSizes[i].first == "integer")
+        {
+
+            uint8_t _rowId[8]{0};
+            ifs.read((char *)&_rowId[8 - payloadSizes[i].second], payloadSizes[i].second);
+            rowId = *((uint64_t *)_rowId);
+        }
+    }
+
+    auto where_ob = db.getParser()->getWhereClauseObject();
+    if (nodeKey > where_ob.getValue())
+    {
+        searchPage(ifs, db, leftChildPointerPageNumber);
+        return -1;
+    }
+    else if (nodeKey < where_ob.getValue())
+    {
+        return 1;
+    }
+    else
+    {
+        db.insertIndexRowId(rowId);
+        searchPage(ifs, db, leftChildPointerPageNumber);
+
+        return 0;
+    }
+}
+
+int searchCell(std::ifstream &ifs, uint16_t cellOffset, SQL_LITE::Database &db, int pageNum, uint8_t pageType, uint32_t keyToLocate = 0)
+{
+    ifs.seekg(db.getPageSize() * (pageNum - 1), std::ios::beg);
+    ifs.seekg(cellOffset, std::ios_base::cur);
+    // reading cell header
+    if (pageType == 0x0D)
+    {
+        return searchLeafPage(ifs, db, pageNum, keyToLocate);
+    }
+    else if (pageType == 0x05)
+    {
+        return searchInteriorPage(ifs, db, pageNum, keyToLocate);
+    }
+    else if (pageType == 0x0A)
+    {
+        return searchIndexLeafCell(ifs, db, pageNum);
+    }
+    else if (pageType == 0x02)
+    {
+        return searchIndexInteriorCell(ifs, db, pageNum);
+    }
+
+    return 0;
+}
+void searchPage(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum, uint32_t KeyToLocate)
+{
+    std::pair<int, uint8_t> pageHeaderInfo = readPageHeader(ifs, db, pageNum);
+    if (pageNum == 1 && pageHeaderInfo.second != -1)
+    {
+        db.setRootPageTables(pageHeaderInfo.first);
+    }
+    // // Now reading cell pointers.
+    int offset = 0;
+    auto startPosition = ifs.tellg();
+    while (offset < pageHeaderInfo.first)
+    {
+        ifs.seekg(startPosition, std::ios::beg);
+        ifs.seekg(offset * 2, std::ios::cur);
+        int16_t cellLocation{'\0'};
+        ifs.read((char *)&cellLocation, 2);
+        if (searchCell(ifs, be16toh(cellLocation), db, pageNum, pageHeaderInfo.second, KeyToLocate) < 0)
+            break;
+
+        offset++;
+    }
+
+    if (pageHeaderInfo.second == 0x05 || pageHeaderInfo.second == 0x02)
+    {
+        ifs.seekg(db.getPageSize() * (pageNum - 1), std::ios::beg);
+        ifs.seekg(8, std::ios::cur);
+        int pageNumber;
+        ifs.read((char *)&pageNumber, 4);
+        pageNumber = be32toh(pageNumber);
+        searchPage(ifs, db, pageNumber, KeyToLocate);
+    }
+}
+
 void readRootPageHeader(std::ifstream &ifs, SQL_LITE::Database &db)
 {
     ifs.seekg(16, std::ios_base::beg);
@@ -381,7 +779,6 @@ void SQL_LITE::FileParser::readFileAndExecuteCommand(std::string command)
         db.execute(command);
 
         auto parser = db.getParser();
-
         auto pageNum = db.getRootPageNumber(parser->getFromClause());
         auto select_clauses = parser->getSelectClause();
         if (select_clauses.size() < 0 || pageNum < 1)
@@ -394,8 +791,22 @@ void SQL_LITE::FileParser::readFileAndExecuteCommand(std::string command)
         }
         else
         {
-            readPage(ifs, db, pageNum);
-            parser->displaySqlResult();
+
+            auto indexTable = db.getRootIndexTable();
+            if (indexTable.contains(parser->getFromClause()) && parser->getWhereClauseObject().getKey() == get<0>(indexTable[parser->getFromClause()]))
+            {
+                searchPage(ifs, db, get<1>(indexTable[parser->getFromClause()]));
+                auto indexedRowIds = db.getIndexedRowIds();
+                for (int i = 0; i < indexedRowIds.size(); i++)
+                {
+                    searchPage(ifs, db, pageNum, indexedRowIds[i]);
+                }
+            }
+            else
+            {
+                readPage(ifs, db, pageNum);
+                parser->displaySqlResult();
+            }
         }
 
         ifs.close();

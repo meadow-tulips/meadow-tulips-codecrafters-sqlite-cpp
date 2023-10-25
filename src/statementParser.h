@@ -31,6 +31,9 @@ namespace SQL_LITE
         void displaySqlResult();
         inline void addSqlResult(std::string res) { sqlResult.push_back(res); }
     };
+
+    std::string trimWhiteSpaceAround(std::string);
+
 };
 
 #endif

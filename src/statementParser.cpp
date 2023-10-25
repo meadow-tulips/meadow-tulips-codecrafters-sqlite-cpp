@@ -1,7 +1,7 @@
 #include "statementParser.h"
 #include <unordered_set>
 
-std::string trimWhiteSpaceAround(std::string s)
+std::string SQL_LITE::trimWhiteSpaceAround(std::string s)
 {
     int startSpaces = 0;
     int endSpaces = 0;

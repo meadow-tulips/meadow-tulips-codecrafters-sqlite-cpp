@@ -111,3 +111,18 @@ std::pair<int, bool> getPrimaryKeyIndex(std::string sqlText)
 
     return std::make_pair(0, false);
 }
+
+void SQL_LITE::Database::parseIndexSQLText(std::string sqlText, uint64_t rootPage)
+{
+    std::vector<std::string> delimiters{"on", "("};
+
+    int offset = sqlText.find(delimiters[0]);
+    std::string text = sqlText.substr(offset + delimiters[0].length());
+
+    auto start = text.find(delimiters[1]);
+    std::string table = SQL_LITE::trimWhiteSpaceAround(text.substr(0, start));
+    std::string columnName = SQL_LITE::trimWhiteSpaceAround(text.substr(start + 1, text.length() - start - 2));
+
+    if (!indexRootPagesMap.contains(table))
+        indexRootPagesMap[table] = std::make_tuple(columnName, rootPage, sqlText);
+}
