@@ -247,6 +247,7 @@ void readBtreeInteriorCell(std::ifstream &ifs, SQL_LITE::Database &db, int pageN
 
 void readBtreeLeafCell(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum)
 {
+
     auto cell_payload_size = readVarint(ifs);
     std::vector<std::pair<std::string, long long>> payloadSizes;
 
@@ -295,6 +296,8 @@ void readCell(std::ifstream &ifs, uint16_t cellOffset, SQL_LITE::Database &db, i
     // reading cell header
     if (pageType == 0x0D)
     {
+        if (pageNum != 1)
+            db.addRecordCount();
         readBtreeLeafCell(ifs, db, pageNum);
     }
     else if (pageType == 0x05)
@@ -354,7 +357,7 @@ void readPage(std::ifstream &ifs, SQL_LITE::Database &db, int pageNum)
         offset++;
     }
 
-    if (pageNum != 1 && pageHeaderInfo.second == 0x05)
+    if (pageHeaderInfo.second == 0x05)
     {
         ifs.seekg(db.getPageSize() * (pageNum - 1), std::ios::beg);
         ifs.seekg(8, std::ios::cur);
@@ -784,31 +787,35 @@ void SQL_LITE::FileParser::readFileAndExecuteCommand(std::string command)
         if (select_clauses.size() < 0 || pageNum < 1)
             return;
 
-        if (select_clauses[0] == "count(*)")
+        // if (select_clauses[0] == "count(*)")
+        // {
+        //     std::pair<int, uint8_t> pageInfo = readPageHeader(ifs, db, pageNum);
+        //     std::cout << pageInfo.first << std::endl;
+        // }
+
+        auto indexTable = db.getRootIndexTable();
+        if (indexTable.contains(parser->getFromClause()) && parser->getWhereClauseObject().getKey() == get<0>(indexTable[parser->getFromClause()]))
         {
-            std::pair<int, uint8_t> pageInfo = readPageHeader(ifs, db, pageNum);
-            std::cout << pageInfo.first << std::endl;
+            searchPage(ifs, db, get<1>(indexTable[parser->getFromClause()]));
+            auto indexedRowIds = db.getIndexedRowIds();
+            for (int i = 0; i < indexedRowIds.size(); i++)
+            {
+                searchPage(ifs, db, pageNum, indexedRowIds[i]);
+            }
         }
         else
         {
-
-            auto indexTable = db.getRootIndexTable();
-            if (indexTable.contains(parser->getFromClause()) && parser->getWhereClauseObject().getKey() == get<0>(indexTable[parser->getFromClause()]))
+            readPage(ifs, db, pageNum);
+            if (select_clauses[0] == "count(*)")
             {
-                searchPage(ifs, db, get<1>(indexTable[parser->getFromClause()]));
-                auto indexedRowIds = db.getIndexedRowIds();
-                for (int i = 0; i < indexedRowIds.size(); i++)
-                {
-                    searchPage(ifs, db, pageNum, indexedRowIds[i]);
-                }
+                std::cout << db.getTotalRecordsCount() << std::endl;
             }
             else
             {
-                readPage(ifs, db, pageNum);
                 parser->displaySqlResult();
             }
         }
-
-        ifs.close();
     }
+
+    ifs.close();
 }

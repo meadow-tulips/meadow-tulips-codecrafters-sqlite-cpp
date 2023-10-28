@@ -19,6 +19,7 @@ namespace SQL_LITE
         std::vector<std::string> supported_commands{".dbinfo", ".tables", "count(*)"};
         SQL_LITE::SQL_St_Parser *parser = NULL;
         std::vector<uint64_t> indexedRowIds;
+        uint64_t totalRecordsOfaTable{0};
 
     public:
         inline SQL_LITE::SQL_St_Parser *getParser() { return parser; }
@@ -26,7 +27,8 @@ namespace SQL_LITE
         inline std::map<std::string, std::tuple<std::string, uint64_t, std::string>> getRootIndexTable() { return indexRootPagesMap; }
         inline void insertIndexRowId(uint64_t rowid) { indexedRowIds.push_back(be64toh(rowid)); }
         inline std::vector<uint64_t> getIndexedRowIds() { return indexedRowIds; }
-
+        inline uint64_t addRecordCount() { return ++totalRecordsOfaTable; }
+        inline uint64_t getTotalRecordsCount() { return totalRecordsOfaTable; }
         uint16_t getPageSize();
         void setPageSize(uint16_t);
         inline uint16_t getRootPageTables() { return rootPageTables; }
